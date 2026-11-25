@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: Secret
+metadata: {name: insurance-secrets}
+type: Opaque
+stringData:   # replace with Sealed Secrets / External Secrets / cloud secret manager
+  SECRET_KEY: "REPLACE_ME"
+  DATA_ENCRYPTION_KEY: "REPLACE_WITH_FERNET_KEY"
+  DATABASE_URL: "postgresql+psycopg2://user:pass@postgres:5432/insurance"
+  ADMIN_PASSWORD: "REPLACE_ME_Strong123"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: insurance-api, labels: {app: insurance-api}}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: insurance-api}}
+  template:
+    metadata: {labels: {app: insurance-api}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: api
+          image: your-registry/insurance-api:1.0.0
+          ports: [{containerPort: 8000}]
+          envFrom: [{secretRef: {name: insurance-secrets}}]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          readinessProbe: {httpGet: {path: /health, port: 8000}}
+          livenessProbe: {httpGet: {path: /health, port: 8000}, initialDelaySeconds: 10}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: insurance-api}
+spec:
+  selector: {app: insurance-api}
+  ports: [{port: 80, targetPort: 8000}]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: insurance-api
+  annotations: {cert-manager.io/cluster-issuer: letsencrypt}
+spec:
+  tls: [{hosts: [insurance.example.com], secretName: insurance-tls}]
+  rules:
+    - host: insurance.example.com
+      http:
+        paths: [{path: /, pathType: Prefix, backend: {service: {name: insurance-api, port: {number: 80}}}}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: insurance-api-ingress-only}
+spec:
+  podSelector: {matchLabels: {app: insurance-api}}
+  policyTypes: [Ingress]
+  ingress: [{ports: [{port: 8000}]}]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: insurance-api}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: insurance-api}
+  minReplicas: 2
+  maxReplicas: 6
+  metrics: [{type: Resource, resource: {name: cpu, target: {type: Utilization, averageUtilization: 70}}}]
